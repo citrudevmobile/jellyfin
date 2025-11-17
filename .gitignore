@@ -255,6 +255,8 @@ deployment/**/pkg-dist/
 deployment/**/pkg-dist-tmp/
 deployment/collect-dist/
 
+jellyfin-web/
+
 jellyfin_version.ini
 
 ci/

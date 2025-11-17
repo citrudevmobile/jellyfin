@@ -165,10 +165,33 @@ namespace MediaBrowser.Providers.MediaInfo
             var libraryOptions = _libraryManager.GetLibraryOptions(audio);
             Track track = new Track(audio.Path);
 
+            _logger.LogCritical("🎵 AUDIOFILEPROBER - Processing audio file: {Path}", audio.Path);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER - Track.TrackNumber: {TrackNumber}", track.TrackNumber);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER - Track.Title: {Title}", track.Title);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER - MediaInfo.IndexNumber: {IndexNumber}", mediaInfo.IndexNumber);
+
+            // Log all available track properties
+            _logger.LogCritical("🎵 AUDIOFILEPROBER - All track properties:");
+            _logger.LogCritical("🎵 AUDIOFILEPROBER -   Album: {Album}", track.Album);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER -   Artist: {Artist}", track.Artist);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER -   AlbumArtist: {AlbumArtist}", track.AlbumArtist);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER -   TrackNumber: {TrackNumber}", track.TrackNumber);
+            _logger.LogCritical("🎵 AUDIOFILEPROBER -   DiscNumber: {DiscNumber}", track.DiscNumber);
+
+            // Log additional fields that might contain vinyl track numbers
+            if (track.AdditionalFields != null)
+            {
+                _logger.LogCritical("🎵 AUDIOFILEPROBER - Additional fields:");
+                foreach (var field in track.AdditionalFields)
+                {
+                    _logger.LogCritical("🎵 AUDIOFILEPROBER -   '{Key}': '{Value}'", field.Key, field.Value);
+                }
+            }
+
             if (track.MetadataFormats
                 .All(mf => string.Equals(mf.ShortName, "ID3v1", StringComparison.OrdinalIgnoreCase)))
             {
-                _logger.LogWarning("File {File} only has ID3v1 tags, some fields may be truncated", audio.Path);
+                _logger.LogCritical("File {File} only has ID3v1 tags, some fields may be truncated", audio.Path);
             }
 
             // We should never use the property setter of the ATL.Track class.
@@ -178,8 +201,7 @@ namespace MediaBrowser.Providers.MediaInfo
             var trackTitle = (string.IsNullOrEmpty(track.Title) ? mediaInfo.Name : track.Title)?.Trim();
             var trackAlbum = (string.IsNullOrEmpty(track.Album) ? mediaInfo.Album : track.Album)?.Trim();
             var trackYear = track.Year is null or 0 ? mediaInfo.ProductionYear : track.Year;
-            // FIX: Handle vinyl track numbers (A1, B2, etc.) and other non-standard formats
-            var trackTrackNumber = ParseTrackNumber(track, mediaInfo, audio.Path);
+            var trackTrackNumber = track.TrackNumber is null or 0 ? mediaInfo.IndexNumber : track.TrackNumber;
             var trackDiscNumber = track.DiscNumber is null or 0 ? mediaInfo.ParentIndexNumber : track.DiscNumber;
 
             // Some users may use a misbehaved tag editor that writes a null character in the tag when not allowed by the standard.
@@ -514,204 +536,6 @@ namespace MediaBrowser.Providers.MediaInfo
             }
 
             return val;
-        }
-
-        /// <summary>
-        /// Parses track numbers from audio file metadata, supporting both standard and vinyl-style numbering formats.
-        /// This method enhances the original track number parsing by handling vinyl formats (A1, B2, etc.) that were previously ignored.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// The original implementation only used the standard track number field which fails for vinyl rips because:
-        /// - Vinyl track numbers are alphanumeric (A1, B2) rather than numeric
-        /// - The ATL library cannot parse these as integers, returning null
-        /// - This caused Jellyfin to fall back to alphabetical sorting instead of proper track order.
-        /// </para>
-        /// <para>
-        /// This method implements a multi-stage approach:
-        /// 1. First tries the standard track number field (for compatibility with existing files)
-        /// 2. Checks additional metadata fields for vinyl-style track numbers
-        /// 3. Falls back to mediaInfo from ffprobe if no track number can be determined.
-        /// </para>
-        /// </remarks>
-        /// <param name="track">The ATL Track object containing audio file metadata.</param>
-        /// <param name="mediaInfo">Media information from ffprobe, used as final fallback.</param>
-        /// <param name="filePath">The path to the audio file, used for logging purposes.</param>
-        /// <returns>
-        /// The parsed track number as nullable integer. Returns:
-        /// - The standard track number if available and valid
-        /// - The parsed vinyl track number if found in additional fields
-        /// - mediaInfo.IndexNumber if no track number could be parsed.
-        /// - null if all parsing attempts fail.
-        /// </returns>
-        /// <example>
-        /// <code>
-        /// // For standard track "01" → returns 1
-        /// // For vinyl track "A1" → returns 1
-        /// // For vinyl track "B2" → returns 22
-        /// // For missing track number → returns mediaInfo.IndexNumber or null
-        /// </code>
-        /// </example>
-        private int? ParseTrackNumber(
-            Track track,
-            Model.MediaInfo.MediaInfo mediaInfo,
-            string filePath)
-        {
-            // First try the standard track number field (works for standard numbering: 01, 02, 03, etc.)
-            // This maintains backward compatibility with existing audio files that use standard numbering
-            if (track.TrackNumber.HasValue && track.TrackNumber.Value > 0)
-            {
-                return track.TrackNumber;
-            }
-
-            // Check for vinyl-style track numbers in additional metadata fields
-            // Common fields where vinyl track numbers might be stored:
-            // - "TRACKNAME/POSITION": Often used by audio ripping software for vinyl
-            // - "TRACKTOTAL": Sometimes contains the vinyl track identifier
-            // - "TRACK": Generic track field that might contain vinyl format
-            string? vinylTrackNumber = null;
-            if (TryGetSanitizedAdditionalFields(track, "TRACKNAME/POSITION", out vinylTrackNumber)
-                || TryGetSanitizedAdditionalFields(track, "TRACKTOTAL", out vinylTrackNumber)
-                || TryGetSanitizedAdditionalFields(track, "TRACK", out vinylTrackNumber))
-            {
-                // Attempt to parse the vinyl track number using specialized parser
-                if (TryParseVinylTrackNumber(vinylTrackNumber, out int parsedTrackNumber))
-                {
-                    _logger.LogDebug(
-                        "Parsed vinyl track number '{VinylTrack}' as {ParsedNumber} for file {File}",
-                        vinylTrackNumber,
-                        parsedTrackNumber,
-                        filePath);
-                    return parsedTrackNumber;
-                }
-            }
-
-            // Final fallback to mediaInfo index number from ffprobe
-            // This preserves the original fallback behavior when no track number can be determined
-            return mediaInfo.IndexNumber;
-        }
-
-        /// <summary>
-        /// Attempts to parse vinyl-style track numbers from string representations.
-        /// Supports common vinyl numbering conventions used in digitized recordings and audiophile collections.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// Vinyl records typically use side-based numbering where:
-        /// - Side A contains tracks A1, A2, A3...
-        /// - Side B contains tracks B1, B2, B3...
-        /// - Some multi-record sets may include sides C, D, etc.
-        /// </para>
-        /// <para>
-        /// This parser converts these side-based numbers to continuous track numbers:
-        /// - A1 → 1, A2 → 2, ..., A20 → 20
-        /// - B1 → 21, B2 → 22, ..., B20 → 40
-        /// - C1 → 41, C2 → 42, etc.
-        /// </para>
-        /// <para>
-        /// The conversion assumes a maximum of 20 tracks per side, which is reasonable for most vinyl records.
-        /// This ensures proper ordering while maintaining the original side-based structure.
-        /// </para>
-        /// </remarks>
-        /// <param name="vinylTrack">The vinyl track number string to parse. Can be null or empty.</param>
-        /// <param name="trackNumber">When this method returns, contains the parsed track number as a continuous integer if parsing succeeded, or 0 if parsing failed.</param>
-        /// <returns>
-        /// true if the vinylTrack string was successfully parsed into a track number; otherwise, false.
-        /// </returns>
-        /// <example>
-        /// <code>
-        /// // Standard vinyl formats:
-        /// TryParseVinylTrackNumber("A1", out int num)  → returns true, num = 1
-        /// TryParseVinylTrackNumber("B2", out int num)  → returns true, num = 22
-        /// TryParseVinylTrackNumber("A01", out int num) → returns true, num = 1
-        ///
-        /// // Reverse formats (less common):
-        /// TryParseVinylTrackNumber("1A", out int num)  → returns true, num = 1
-        /// TryParseVinylTrackNumber("2B", out int num)  → returns true, num = 22
-        ///
-        /// // Invalid formats:
-        /// TryParseVinylTrackNumber("", out int num)     → returns false, num = 0
-        /// TryParseVinylTrackNumber("Side A", out int num) → returns false, num = 0
-        /// TryParseVinylTrackNumber("Track 1", out int num) → returns false, num = 0
-        /// </code>
-        /// </example>
-        private bool TryParseVinylTrackNumber(
-            string? vinylTrack,
-            out int trackNumber)
-        {
-            trackNumber = 0;
-
-            // Early return for null, empty, or whitespace-only inputs
-            if (string.IsNullOrWhiteSpace(vinylTrack))
-            {
-                return false;
-            }
-
-            // Normalize the input for consistent parsing:
-            // - Trim leading/trailing whitespace
-            // - Convert to uppercase using invariant culture to avoid locale-specific case conversion issues
-            string normalizedTrack = vinylTrack.Trim().ToUpperInvariant();
-
-            try
-            {
-                // Handle standard vinyl formats: [Side Letter][Track Number]
-                // Examples: A1, B2, A01, B02, C15
-                // Pattern: Letter followed by one or more digits
-                if (normalizedTrack.Length >= 2 && char.IsLetter(normalizedTrack[0]) && char.IsDigit(normalizedTrack[1]))
-                {
-                    // Convert side letter to numeric value (A=0, B=1, C=2, etc.)
-                    // Use invariant culture to ensure consistent case conversion across all locales
-                    var side = char.ToUpper(normalizedTrack[0], CultureInfo.InvariantCulture) - 'A';
-
-                    // Extract the numeric portion after the side letter
-                    var numericPart = normalizedTrack.Substring(1);
-
-                    // Parse the track number within the side
-                    if (int.TryParse(numericPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out int trackOnSide))
-                    {
-                        // Convert to continuous track number across all sides
-                        // Assumes maximum 20 tracks per side (reasonable for vinyl records)
-                        trackNumber = (side * 20) + trackOnSide;
-                        return true;
-                    }
-                }
-
-                // Handle reverse vinyl formats: [Track Number][Side Letter]
-                // Examples: 1A, 2B, 01A, 02B (less common but supported for completeness)
-                // Pattern: One or more digits followed by a letter
-                if (normalizedTrack.Length >= 2 && char.IsDigit(normalizedTrack[0]) && char.IsLetter(normalizedTrack[^1]))
-                {
-                    // Convert side letter to numeric value (A=0, B=1, C=2, etc.)
-                    var side = char.ToUpper(normalizedTrack[^1], CultureInfo.InvariantCulture) - 'A';
-
-                    // Extract the numeric portion before the side letter
-                    var numericPart = normalizedTrack[..^1];
-
-                    if (int.TryParse(numericPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out int trackOnSide))
-                    {
-                        trackNumber = (side * 20) + trackOnSide;
-                        return true;
-                    }
-                }
-
-                // Final attempt: try parsing as a plain numeric track number
-                // This handles cases where the track number is already in standard format
-                if (int.TryParse(normalizedTrack, NumberStyles.Integer, CultureInfo.InvariantCulture, out trackNumber))
-                {
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                // Log parsing failures for debugging, but don't fail the entire metadata scan
-                // This ensures that files with malformed track numbers don't break the scanning process
-                _logger.LogDebug(
-                    ex,
-                    "Failed to parse vinyl track number '{VinylTrack}'",
-                    vinylTrack);
-            }
-
-            return false;
         }
 
         private string? GetSanitizedStringTag(string? tag, string filePath)

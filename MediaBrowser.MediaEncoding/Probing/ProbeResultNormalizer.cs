@@ -930,6 +930,15 @@ namespace MediaBrowser.MediaEncoding.Probing
                         {
                             stream.Rotation = data.Rotation;
                         }
+
+                        // Parse video frame cropping metadata from side_data
+                        // TODO: save them and make HW filters to apply them in HWA pipelines
+                        else if (string.Equals(data.SideDataType, "Frame Cropping", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Streams containing artificially added frame cropping
+                            // metadata should not be marked as anamorphic.
+                            stream.IsAnamorphic = false;
+                        }
                     }
                 }
 
@@ -1348,11 +1357,34 @@ namespace MediaBrowser.MediaEncoding.Probing
                 audio.AlbumArtists = audio.Artists;
             }
 
-            // Track number
-            audio.IndexNumber = GetDictionaryTrackOrDiscNumber(tags, "track");
+            // Handle track number - support both regular and vinyl formats
+            var trackValue = tags.GetValueOrDefault("track");
+            _logger.LogError("[VinylParser] START - Track number processing. Raw value: '{TrackValue}'", trackValue);
 
-            // Disc number
-            audio.ParentIndexNumber = GetDictionaryTrackOrDiscNumber(tags, "disc");
+            var (discNumber, trackNumber) = ParseVinylTrackNumber(trackValue);
+
+            // If vinyl format detected, use the parsed values
+            if (discNumber.HasValue && trackNumber.HasValue)
+            {
+                _logger.LogError(
+                    "[VinylParser] USING VINYL - Disc: {DiscNumber}, Track: {TrackNumber}",
+                    discNumber,
+                    trackNumber);
+                audio.IndexNumber = trackNumber;
+                audio.ParentIndexNumber = discNumber;
+            }
+            else
+            {
+                _logger.LogError("[VinylParser] USING REGULAR - No vinyl format detected");
+                // Fall back to regular parsing for non-vinyl tracks
+                audio.IndexNumber = GetDictionaryTrackOrDiscNumber(tags, "track");
+                audio.ParentIndexNumber = GetDictionaryTrackOrDiscNumber(tags, "disc");
+
+                _logger.LogError(
+                    "[VinylParser] REGULAR RESULT - Track: {TrackNumber}, Disc: {DiscNumber}",
+                    audio.IndexNumber,
+                    audio.ParentIndexNumber);
+            }
 
             // There's several values in tags may or may not be present
             FetchStudios(audio, tags, "organization");
@@ -1374,12 +1406,72 @@ namespace MediaBrowser.MediaEncoding.Probing
             audio.TrySetProviderId(MetadataProvider.MusicBrainzAlbum, mb);
 
             mb = GetMultipleMusicBrainzId(tags.GetValueOrDefault("MusicBrainz Release Group Id"))
-                 ?? GetMultipleMusicBrainzId(tags.GetValueOrDefault("MUSICBRAINZ_RELEASEGROUPID"));
+                ?? GetMultipleMusicBrainzId(tags.GetValueOrDefault("MUSICBRAINZ_RELEASEGROUPID"));
             audio.TrySetProviderId(MetadataProvider.MusicBrainzReleaseGroup, mb);
 
             mb = GetMultipleMusicBrainzId(tags.GetValueOrDefault("MusicBrainz Release Track Id"))
-                 ?? GetMultipleMusicBrainzId(tags.GetValueOrDefault("MUSICBRAINZ_RELEASETRACKID"));
+                ?? GetMultipleMusicBrainzId(tags.GetValueOrDefault("MUSICBRAINZ_RELEASETRACKID"));
             audio.TrySetProviderId(MetadataProvider.MusicBrainzTrack, mb);
+        }
+
+        /// <summary>
+        /// Parses vinyl-style track numbers (A1, B2, etc.) and converts them to disc/track pairs.
+        /// </summary>
+        /// <param name="trackValue">The track value from metadata.</param>
+        /// <returns>Tuple with disc number and track number.</returns>
+        private (int? DiscNumber, int? TrackNumber) ParseVinylTrackNumber(string trackValue)
+        {
+            if (string.IsNullOrEmpty(trackValue))
+            {
+                _logger.LogError("[VinylParser] Track value is null or empty");
+                return (null, null);
+            }
+
+            _logger.LogError("[VinylParser] Processing track value: '{TrackValue}'", trackValue);
+
+            var span = trackValue.AsSpan().LeftPart('/');
+            _logger.LogError("[VinylParser] After splitting on '/': '{Span}'", span.ToString());
+
+            // Handle vinyl format: A1, B2, C3, etc.
+            if (span.Length >= 2 && char.IsLetter(span[0]) && char.IsDigit(span[1]))
+            {
+                var sideChar = char.ToUpperInvariant(span[0]);
+                var side = sideChar - 'A' + 1; // A=1, B=2, C=3, etc.
+                var track = 0;
+
+                _logger.LogError(
+                    "[VinylParser] Detected vinyl format. Side: '{SideChar}' -> {Side}, Remaining: '{Remaining}'",
+                    sideChar,
+                    side,
+                    span.Slice(1).ToString());
+
+                // Parse the numeric part after the letter
+                if (int.TryParse(span.Slice(1), out track))
+                {
+                    _logger.LogError(
+                        "[VinylParser] SUCCESS - Parsed vinyl track. Side: {Side}, Track: {Track}",
+                        side,
+                        track);
+                    return (side, track); // Return disc number = side, track number = track
+                }
+                else
+                {
+                    _logger.LogError(
+                        "[VinylParser] FAILED - Could not parse numeric part: '{NumericPart}'",
+                        span.Slice(1).ToString());
+                }
+            }
+            else
+            {
+                _logger.LogError(
+                    "[VinylParser] Not a vinyl format. Length: {Length}, First char is letter: {IsLetter}, Second char is digit: {IsDigit}",
+                    span.Length,
+                    span.Length >= 1 ? char.IsLetter(span[0]) : false,
+                    span.Length >= 2 ? char.IsDigit(span[1]) : false);
+            }
+
+            _logger.LogError("[VinylParser] No vinyl format detected, returning null");
+            return (null, null);
         }
 
         private static string GetMultipleMusicBrainzId(string value)
